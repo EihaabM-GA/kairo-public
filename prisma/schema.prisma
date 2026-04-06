@@ -1,0 +1,110 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model StoreConfig {
+  id        String   @id @default(cuid())
+  shop      String   @unique
+  role      String   // "parent" | "child" | "both"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model StoreConnection {
+  id         String   @id @default(cuid())
+  parentShop String
+  childShop  String
+  status     String   @default("active") // "active" | "paused"
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  syncSettings SyncSetting?
+  pricingRule  PricingRule?
+  syncLogs     SyncLog[]
+  productMaps  ProductMap[]
+
+  @@unique([parentShop, childShop])
+}
+
+model SyncSetting {
+  id           String          @id @default(cuid())
+  connectionId String          @unique
+  connection   StoreConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  syncTitle       Boolean  @default(true)
+  syncDescription Boolean  @default(true)
+  syncImages      Boolean  @default(true)
+  syncPrice       Boolean  @default(false)
+  syncInventory   Boolean  @default(true)
+  syncVendor      Boolean  @default(false)
+  syncTags        Boolean  @default(true)
+  autoSync        Boolean  @default(false)
+  schedule        String?  // "realtime" | "hourly" | "daily" | "weekly"
+  lastSyncAt      DateTime?
+  updatedAt       DateTime @updatedAt
+}
+
+model PricingRule {
+  id           String          @id @default(cuid())
+  connectionId String          @unique
+  connection   StoreConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  type         String          @default("percentage") // "percentage" | "fixed"
+  adjustment   Float           @default(0)
+  updatedAt    DateTime        @updatedAt
+}
+
+model ProductMap {
+  id              String          @id @default(cuid())
+  connectionId    String
+  connection      StoreConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  parentProductId String
+  childProductId  String?
+  parentSku       String?
+  syncedAt        DateTime?
+
+  @@unique([connectionId, parentProductId])
+}
+
+model SyncLog {
+  id           String          @id @default(cuid())
+  connectionId String
+  connection   StoreConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  status       String          // "running" | "success" | "error"
+  synced       Int             @default(0)
+  created      Int             @default(0)
+  updated      Int             @default(0)
+  errors       Int             @default(0)
+  details      String?
+  createdAt    DateTime        @default(now())
+}
