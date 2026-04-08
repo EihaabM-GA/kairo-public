@@ -32,12 +32,11 @@ export const action = async ({ request }) => {
   if (intent === "sync") {
     const connectionId = formData.get("connectionId");
     const result = await syncConnection(connectionId);
-    return { result };
+    return { result, intent };
   }
 
   if (intent === "reset") {
     const shop = session.shop;
-    // Delete all connections where this shop is involved
     const connections = await prisma.storeConnection.findMany({
       where: { OR: [{ parentShop: shop }, { childShop: shop }] },
     });
@@ -56,7 +55,28 @@ export default function Dashboard() {
   const fetcher = useFetcher();
   const isSyncing = fetcher.state !== "idle";
 
-  const roleLabel = { parent: "Parent 🏪", child: "Child 🏬", both: "Parent + Child 🔄" }[role];
+  const roleLabel = {
+    parent: "Parent 🏪",
+    child: "Child 🏬",
+    both: "Parent + Child 🔄",
+  }[role] ?? role;
+
+  const syncNow = (connectionId) => {
+    fetcher.submit({ intent: "sync", connectionId }, { method: "post" });
+  };
+
+  const resetStore = () => {
+    if (
+      confirm(
+        "This will permanently delete ALL Kairo data for this store — connections, product maps, sync logs, and pricing rules. Are you sure?"
+      )
+    ) {
+      fetcher.submit({ intent: "reset" }, { method: "post" });
+    }
+  };
+
+  const syncResult =
+    fetcher.data?.intent === "sync" ? fetcher.data?.result : null;
 
   return (
     <s-page heading="Kairo Sync — Dashboard">
@@ -64,10 +84,10 @@ export default function Dashboard() {
         + Add Connection
       </s-button>
 
+      {/* Store info */}
       <s-section heading={`This store: ${shop}`}>
         <s-paragraph>
-          <s-text>Role: </s-text>
-          <s-text>{roleLabel}</s-text>
+          <s-text>Role: {roleLabel}</s-text>
         </s-paragraph>
         <s-paragraph>
           <s-link href="/app/connections">Manage connections</s-link>
@@ -76,6 +96,23 @@ export default function Dashboard() {
         </s-paragraph>
       </s-section>
 
+      {/* Latest sync result banner */}
+      {syncResult && (
+        <s-section heading="Sync Result">
+          <s-paragraph>
+            {syncResult.error ? (
+              <s-text tone="critical">❌ {syncResult.error}</s-text>
+            ) : (
+              <s-text tone="success">
+                ✅ {syncResult.synced} processed — {syncResult.created} created,{" "}
+                {syncResult.updated} updated, {syncResult.errors} errors.
+              </s-text>
+            )}
+          </s-paragraph>
+        </s-section>
+      )}
+
+      {/* Connections */}
       {connections.length === 0 ? (
         <s-section heading="No connections yet">
           <s-paragraph>
@@ -87,7 +124,7 @@ export default function Dashboard() {
         connections.map((conn) => {
           const isParent = conn.parentShop === shop;
           const otherShop = isParent ? conn.childShop : conn.parentShop;
-          const lastLog = conn.syncLogs[0];
+          const lastLog = conn.syncLogs?.[0];
           const lastSync = conn.syncSettings?.lastSyncAt
             ? new Date(conn.syncSettings.lastSyncAt).toLocaleString()
             : "Never";
@@ -95,40 +132,43 @@ export default function Dashboard() {
           return (
             <s-section
               key={conn.id}
-              heading={`${isParent ? "→ Pushing to" : "← Pulling from"} ${otherShop}`}
+              heading={
+                isParent ? `→ Pushing to ${otherShop}` : `← Receiving from ${otherShop}`
+              }
             >
               <s-stack direction="block" gap="tight">
                 <s-paragraph>
-                  <s-text>Status: </s-text>
-                  <s-text>{conn.status === "active" ? "✅ Active" : "⏸ Paused"}</s-text>
+                  <s-text>
+                    Status:{" "}
+                    {conn.status === "active" ? "✅ Active" : "⏸ Paused"}
+                  </s-text>
                 </s-paragraph>
                 <s-paragraph>
-                  <s-text>Last sync: </s-text>
-                  <s-text>{lastSync}</s-text>
+                  <s-text>Last sync: {lastSync}</s-text>
                 </s-paragraph>
                 {lastLog && (
                   <s-paragraph>
-                    <s-text>Last result: </s-text>
                     <s-text>
-                      {lastLog.status} — {lastLog.synced} synced, {lastLog.created} created,{" "}
-                      {lastLog.updated} updated, {lastLog.errors} errors
+                      Last result: {lastLog.status} — {lastLog.synced} synced,{" "}
+                      {lastLog.created} created, {lastLog.updated} updated,{" "}
+                      {lastLog.errors} errors
                     </s-text>
                   </s-paragraph>
                 )}
+
                 <s-stack direction="inline" gap="tight">
                   {isParent && (
-                    <fetcher.Form method="post">
-                      <input type="hidden" name="intent" value="sync" />
-                      <input type="hidden" name="connectionId" value={conn.id} />
-                      <s-button
-                        submit
-                        {...(isSyncing ? { loading: true } : {})}
-                      >
-                        Sync Now
-                      </s-button>
-                    </fetcher.Form>
+                    <s-button
+                      onClick={() => syncNow(conn.id)}
+                      {...(isSyncing ? { loading: true } : {})}
+                    >
+                      Sync Now
+                    </s-button>
                   )}
-                  <s-button href={`/app/connections/${conn.id}`} variant="secondary">
+                  <s-button
+                    href={`/app/connections/${conn.id}`}
+                    variant="secondary"
+                  >
                     Settings
                   </s-button>
                 </s-stack>
@@ -138,24 +178,19 @@ export default function Dashboard() {
         })
       )}
 
+      {/* Danger zone */}
       <s-section slot="aside" heading="Danger Zone">
         <s-paragraph>
-          Reset wipes all connections, product maps, sync logs, and pricing rules for this store.
+          Reset wipes all connections, product maps, sync logs, and pricing
+          rules for this store and returns you to the setup screen.
         </s-paragraph>
-        <fetcher.Form method="post">
-          <input type="hidden" name="intent" value="reset" />
-          <s-button
-            submit
-            tone="critical"
-            onClick={(e) => {
-              if (!confirm("This will delete all Kairo data for this store. Are you sure?")) {
-                e.preventDefault();
-              }
-            }}
-          >
-            Reset Store
-          </s-button>
-        </fetcher.Form>
+        <s-button
+          tone="critical"
+          onClick={resetStore}
+          {...(isSyncing ? { loading: true } : {})}
+        >
+          Reset Store
+        </s-button>
       </s-section>
     </s-page>
   );

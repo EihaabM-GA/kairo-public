@@ -1,5 +1,5 @@
 import { redirect } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useNavigate } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
@@ -26,18 +26,28 @@ export const action = async ({ request }) => {
   const intent = formData.get("intent");
 
   if (intent === "create") {
-    const childShop = formData.get("childShop")?.trim().toLowerCase().replace(/https?:\/\//, "");
-    const parentShop = formData.get("parentShop")?.trim().toLowerCase().replace(/https?:\/\//, "");
+    // Normalise domains — strip protocol, lowercase, trim
+    const normalize = (v) =>
+      (v || "")
+        .trim()
+        .toLowerCase()
+        .replace(/https?:\/\//, "")
+        .replace(/\/$/, "");
 
-    const ps = parentShop || shop;
-    const cs = childShop || shop;
+    const rawParent = formData.get("parentShop");
+    const rawChild = formData.get("childShop");
 
-    if (ps === cs) return { error: "Parent and child cannot be the same store" };
+    const ps = normalize(rawParent) || shop;
+    const cs = normalize(rawChild) || shop;
+
+    if (!ps) return { error: "Parent shop domain is required." };
+    if (!cs) return { error: "Child shop domain is required." };
+    if (ps === cs) return { error: "Parent and child cannot be the same store." };
 
     const existing = await prisma.storeConnection.findUnique({
       where: { parentShop_childShop: { parentShop: ps, childShop: cs } },
     });
-    if (existing) return { error: "This connection already exists" };
+    if (existing) return { error: "A connection between these two stores already exists." };
 
     const conn = await prisma.storeConnection.create({
       data: {
@@ -52,6 +62,7 @@ export const action = async ({ request }) => {
             syncPrice: false,
             syncVendor: false,
             syncTags: true,
+            autoSync: false,
           },
         },
         pricingRule: {
@@ -71,7 +82,10 @@ export const action = async ({ request }) => {
 
   if (intent === "toggle") {
     const connectionId = formData.get("connectionId");
-    const conn = await prisma.storeConnection.findUnique({ where: { id: connectionId } });
+    const conn = await prisma.storeConnection.findUnique({
+      where: { id: connectionId },
+    });
+    if (!conn) return { error: "Connection not found." };
     await prisma.storeConnection.update({
       where: { id: connectionId },
       data: { status: conn.status === "active" ? "paused" : "active" },
@@ -87,90 +101,155 @@ export default function Connections() {
   const fetcher = useFetcher();
   const isLoading = fetcher.state !== "idle";
   const actionData = fetcher.data;
+  const navigate = useNavigate();
 
   const canBeParent = role === "parent" || role === "both";
-  const canBeChild  = role === "child"  || role === "both";
+  const canBeChild = role === "child" || role === "both";
+
+  // KEY FIX: use fetcher.submit() for all mutations
+  const createConnection = () => {
+    const parentInput = document.getElementById("ks-parentShop");
+    const childInput = document.getElementById("ks-childShop");
+    const data = { intent: "create" };
+    if (canBeParent) {
+      data.parentShop = shop;
+      data.childShop = childInput?.value ?? "";
+    } else {
+      data.childShop = shop;
+      data.parentShop = parentInput?.value ?? "";
+    }
+    fetcher.submit(data, { method: "post" });
+  };
+
+  const toggleConnection = (connectionId) => {
+    fetcher.submit({ intent: "toggle", connectionId }, { method: "post" });
+  };
+
+  const deleteConnection = (connectionId) => {
+    if (confirm("Permanently delete this connection and all its sync history?")) {
+      fetcher.submit({ intent: "delete", connectionId }, { method: "post" });
+    }
+  };
 
   return (
     <s-page heading="Connections">
+      <s-button slot="primary-action" href="/app/dashboard" variant="tertiary">
+        ← Dashboard
+      </s-button>
+
+      {/* Add new connection */}
       <s-section heading="Add New Connection">
         {actionData?.error && (
           <s-paragraph>
             <s-text tone="critical">⚠️ {actionData.error}</s-text>
           </s-paragraph>
         )}
-        <fetcher.Form method="post">
-          <input type="hidden" name="intent" value="create" />
-          <s-stack direction="block" gap="base">
-            {canBeParent && (
-              <s-stack direction="block" gap="tight">
-                <s-paragraph>
-                  <s-text>Push products FROM this store TO a child store:</s-text>
-                </s-paragraph>
-                <input type="hidden" name="parentShop" value={shop} />
-                <s-text-field
-                  label="Child store domain"
-                  name="childShop"
-                  placeholder="other-store.myshopify.com"
-                />
-              </s-stack>
-            )}
-            {canBeChild && !canBeParent && (
-              <s-stack direction="block" gap="tight">
-                <s-paragraph>
-                  <s-text>Receive products FROM a parent store:</s-text>
-                </s-paragraph>
-                <input type="hidden" name="childShop" value={shop} />
-                <s-text-field
-                  label="Parent store domain"
-                  name="parentShop"
-                  placeholder="parent-store.myshopify.com"
-                />
-              </s-stack>
-            )}
-            <s-button submit {...(isLoading ? { loading: true } : {})}>
-              Create Connection
-            </s-button>
-          </s-stack>
-        </fetcher.Form>
+
+        <s-stack direction="block" gap="base">
+          {canBeParent && (
+            <s-stack direction="block" gap="tight">
+              <s-paragraph>
+                <s-text>
+                  This store (<strong>{shop}</strong>) will push products TO:
+                </s-text>
+              </s-paragraph>
+              <s-text-field
+                id="ks-childShop"
+                label="Child store domain"
+                placeholder="other-store.myshopify.com"
+              />
+            </s-stack>
+          )}
+
+          {canBeChild && !canBeParent && (
+            <s-stack direction="block" gap="tight">
+              <s-paragraph>
+                <s-text>
+                  This store (<strong>{shop}</strong>) will receive products FROM:
+                </s-text>
+              </s-paragraph>
+              <s-text-field
+                id="ks-parentShop"
+                label="Parent store domain"
+                placeholder="parent-store.myshopify.com"
+              />
+            </s-stack>
+          )}
+
+          {canBeParent && canBeChild && (
+            <s-paragraph>
+              <s-text tone="subdued">
+                Your role is "Both" — you're adding a connection where this store is the parent (pusher).
+                To add one where this store is the child, update your role first.
+              </s-text>
+            </s-paragraph>
+          )}
+
+          <s-button
+            onClick={createConnection}
+            {...(isLoading ? { loading: true } : {})}
+          >
+            Create Connection
+          </s-button>
+        </s-stack>
       </s-section>
 
+      {/* Existing connections */}
       {connections.length === 0 ? (
-        <s-section heading="No connections">
-          <s-paragraph>Add your first connection above to get started.</s-paragraph>
+        <s-section heading="No connections yet">
+          <s-paragraph>
+            Add your first connection above to start syncing products between stores.
+          </s-paragraph>
         </s-section>
       ) : (
         connections.map((conn) => {
           const isParent = conn.parentShop === shop;
           const other = isParent ? conn.childShop : conn.parentShop;
-          const direction = isParent ? `→ Push to ${other}` : `← Receive from ${other}`;
+          const isPaused = conn.status === "paused";
 
           return (
-            <s-section key={conn.id} heading={direction}>
-              <s-stack direction="inline" gap="tight">
-                <s-button href={`/app/connections/${conn.id}`} variant="secondary">
-                  Configure
-                </s-button>
-                <fetcher.Form method="post" style={{ display: "inline" }}>
-                  <input type="hidden" name="intent" value="toggle" />
-                  <input type="hidden" name="connectionId" value={conn.id} />
-                  <s-button submit variant="tertiary">
-                    {conn.status === "active" ? "Pause" : "Resume"}
+            <s-section
+              key={conn.id}
+              heading={isParent ? `→ Pushing to ${other}` : `← Receiving from ${other}`}
+            >
+              <s-stack direction="block" gap="tight">
+                <s-paragraph>
+                  <s-text>
+                    Status: {isPaused ? "⏸ Paused" : "✅ Active"}
+                  </s-text>
+                </s-paragraph>
+                {conn.syncSettings?.lastSyncAt && (
+                  <s-paragraph>
+                    <s-text>
+                      Last sync:{" "}
+                      {new Date(conn.syncSettings.lastSyncAt).toLocaleString()}
+                    </s-text>
+                  </s-paragraph>
+                )}
+
+                <s-stack direction="inline" gap="tight">
+                  <s-button
+                    onClick={() => navigate(`/app/connections/${conn.id}`)}
+                    variant="secondary"
+                  >
+                    Configure
                   </s-button>
-                </fetcher.Form>
-                <fetcher.Form
-                  method="post"
-                  style={{ display: "inline" }}
-                  onSubmit={(e) => {
-                    if (!confirm("Delete this connection?")) e.preventDefault();
-                  }}
-                >
-                  <input type="hidden" name="intent" value="delete" />
-                  <input type="hidden" name="connectionId" value={conn.id} />
-                  <s-button submit tone="critical" variant="tertiary">
+                  <s-button
+                    variant="tertiary"
+                    onClick={() => toggleConnection(conn.id)}
+                    {...(isLoading ? { loading: true } : {})}
+                  >
+                    {isPaused ? "Resume" : "Pause"}
+                  </s-button>
+                  <s-button
+                    tone="critical"
+                    variant="tertiary"
+                    onClick={() => deleteConnection(conn.id)}
+                    {...(isLoading ? { loading: true } : {})}
+                  >
                     Delete
                   </s-button>
-                </fetcher.Form>
+                </s-stack>
               </s-stack>
             </s-section>
           );

@@ -21,38 +21,38 @@ export const action = async ({ request, params }) => {
   const connectionId = params.connectionId;
 
   if (intent === "saveSettings") {
-    const bool = (key) => formData.get(key) === "on";
+    const bool = (key) => formData.get(key) === "true";
     await prisma.syncSetting.upsert({
       where: { connectionId },
       update: {
-        syncTitle:       bool("syncTitle"),
+        syncTitle: bool("syncTitle"),
         syncDescription: bool("syncDescription"),
-        syncImages:      bool("syncImages"),
-        syncPrice:       bool("syncPrice"),
-        syncInventory:   bool("syncInventory"),
-        syncVendor:      bool("syncVendor"),
-        syncTags:        bool("syncTags"),
-        autoSync:        bool("autoSync"),
-        schedule:        formData.get("schedule") || null,
+        syncImages: bool("syncImages"),
+        syncPrice: bool("syncPrice"),
+        syncInventory: bool("syncInventory"),
+        syncVendor: bool("syncVendor"),
+        syncTags: bool("syncTags"),
+        autoSync: bool("autoSync"),
+        schedule: formData.get("schedule") || null,
       },
       create: {
         connectionId,
-        syncTitle:       bool("syncTitle"),
+        syncTitle: bool("syncTitle"),
         syncDescription: bool("syncDescription"),
-        syncImages:      bool("syncImages"),
-        syncPrice:       bool("syncPrice"),
-        syncInventory:   bool("syncInventory"),
-        syncVendor:      bool("syncVendor"),
-        syncTags:        bool("syncTags"),
-        autoSync:        bool("autoSync"),
-        schedule:        formData.get("schedule") || null,
+        syncImages: bool("syncImages"),
+        syncPrice: bool("syncPrice"),
+        syncInventory: bool("syncInventory"),
+        syncVendor: bool("syncVendor"),
+        syncTags: bool("syncTags"),
+        autoSync: bool("autoSync"),
+        schedule: formData.get("schedule") || null,
       },
     });
     return { saved: "settings" };
   }
 
   if (intent === "savePricing") {
-    const type       = formData.get("pricingType");
+    const type = formData.get("pricingType") || "percentage";
     const adjustment = parseFloat(formData.get("adjustment") || "0");
     await prisma.pricingRule.upsert({
       where: { connectionId },
@@ -70,41 +70,108 @@ export const action = async ({ request, params }) => {
   return null;
 };
 
+// ─── Toggle state managed in React (mirrors server values on load) ───────────
+const SYNC_FIELDS = [
+  { key: "syncTitle", label: "Product Title" },
+  { key: "syncDescription", label: "Description" },
+  { key: "syncImages", label: "Images" },
+  { key: "syncPrice", label: "Price (uses pricing rule below)" },
+  { key: "syncInventory", label: "Inventory Quantity" },
+  { key: "syncVendor", label: "Vendor / Brand" },
+  { key: "syncTags", label: "Tags" },
+];
+
+import { useState } from "react";
+
 export default function ConnectionSettings() {
   const { conn } = useLoaderData();
   const fetcher = useFetcher();
   const isLoading = fetcher.state !== "idle";
+
   const s = conn.syncSettings;
   const p = conn.pricingRule;
+
+  // Local toggle state (initialised from server data)
+  const [toggles, setToggles] = useState({
+    syncTitle: s?.syncTitle ?? true,
+    syncDescription: s?.syncDescription ?? true,
+    syncImages: s?.syncImages ?? true,
+    syncPrice: s?.syncPrice ?? false,
+    syncInventory: s?.syncInventory ?? true,
+    syncVendor: s?.syncVendor ?? false,
+    syncTags: s?.syncTags ?? true,
+    autoSync: s?.autoSync ?? false,
+  });
+  const [schedule, setSchedule] = useState(s?.schedule || "");
+  const [pricingType, setPricingType] = useState(p?.type || "percentage");
+  const [adjustment, setAdjustment] = useState(String(p?.adjustment ?? 0));
+
+  const toggle = (key) => setToggles((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  // KEY FIX: read state from React, not from DOM s-* elements
+  const saveSettings = () => {
+    fetcher.submit(
+      {
+        intent: "saveSettings",
+        ...Object.fromEntries(
+          Object.entries(toggles).map(([k, v]) => [k, String(v)])
+        ),
+        schedule,
+      },
+      { method: "post" }
+    );
+  };
+
+  const savePricing = () => {
+    fetcher.submit(
+      { intent: "savePricing", pricingType, adjustment },
+      { method: "post" }
+    );
+  };
+
+  const syncNow = () => {
+    fetcher.submit({ intent: "syncNow" }, { method: "post" });
+  };
 
   const saved = fetcher.data?.saved;
   const syncResult = fetcher.data?.syncResult;
 
-  const checked = (val) => (val ? { checked: true } : {});
-
   return (
-    <s-page heading={`Connection: ${conn.parentShop} → ${conn.childShop}`}>
-      <s-button slot="primary-action" href="/app/connections" variant="tertiary">
+    <s-page
+      heading={`Connection: ${conn.parentShop} → ${conn.childShop}`}
+    >
+      <s-button
+        slot="primary-action"
+        href="/app/connections"
+        variant="tertiary"
+      >
         ← Back
       </s-button>
 
+      {/* Save confirmation */}
       {saved && (
         <s-section heading="">
           <s-paragraph>
-            <s-text tone="success">✅ {saved === "settings" ? "Sync settings" : "Pricing rule"} saved.</s-text>
+            <s-text tone="success">
+              ✅{" "}
+              {saved === "settings" ? "Sync settings" : "Pricing rule"} saved
+              successfully.
+            </s-text>
           </s-paragraph>
         </s-section>
       )}
 
+      {/* Sync result */}
       {syncResult && (
         <s-section heading="Sync Result">
           <s-paragraph>
             {syncResult.error ? (
-              <s-text tone="critical">Error: {syncResult.error}</s-text>
+              <s-text tone="critical">❌ {syncResult.error}</s-text>
             ) : (
-              <s-text>
-                ✅ {syncResult.synced} processed — {syncResult.created} created,{" "}
-                {syncResult.updated} updated, {syncResult.errors} errors.
+              <s-text tone="success">
+                ✅ {syncResult.synced} processed — {syncResult.created}{" "}
+                created, {syncResult.updated} updated, {syncResult.errors}{" "}
+                errors.
               </s-text>
             )}
           </s-paragraph>
@@ -112,91 +179,103 @@ export default function ConnectionSettings() {
       )}
 
       {/* Manual sync */}
-      <s-section heading="Sync">
+      <s-section heading="Manual Sync">
         <s-paragraph>
-          Manually push all parent products to this child store right now.
+          Push all parent products to this child store right now.
         </s-paragraph>
-        <fetcher.Form method="post">
-          <input type="hidden" name="intent" value="syncNow" />
-          <s-button submit {...(isLoading ? { loading: true } : {})}>
-            Sync Now
-          </s-button>
-        </fetcher.Form>
+        <s-button
+          onClick={syncNow}
+          {...(isLoading ? { loading: true } : {})}
+        >
+          Sync Now
+        </s-button>
       </s-section>
 
       {/* Sync settings */}
       <s-section heading="What to Sync">
-        <fetcher.Form method="post">
-          <input type="hidden" name="intent" value="saveSettings" />
-          <s-stack direction="block" gap="base">
-            <s-paragraph><s-text>Toggle each field independently:</s-text></s-paragraph>
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            <s-text>Toggle each field independently:</s-text>
+          </s-paragraph>
 
-            {[
-              ["syncTitle",       "Product Title"],
-              ["syncDescription", "Description"],
-              ["syncImages",      "Images"],
-              ["syncPrice",       "Price (uses pricing rule below)"],
-              ["syncInventory",   "Inventory Quantity"],
-              ["syncVendor",      "Vendor / Brand"],
-              ["syncTags",        "Tags"],
-            ].map(([name, label]) => (
-              <s-checkbox key={name} name={name} label={label} {...checked(s?.[name])} />
-            ))}
-
-            <s-paragraph>
-              <s-text>Auto Sync:</s-text>
-            </s-paragraph>
-            <s-checkbox name="autoSync" label="Enable automatic sync via webhooks (realtime on product change)" {...checked(s?.autoSync)} />
-
-            <s-select
-              name="schedule"
-              label="Scheduled sync interval (requires cron hitting /api/sync/scheduled)"
-              value={s?.schedule || ""}
-              options={JSON.stringify([
-                { label: "Disabled", value: "" },
-                { label: "Realtime (webhook)", value: "realtime" },
-                { label: "Hourly", value: "hourly" },
-                { label: "Daily", value: "daily" },
-                { label: "Weekly", value: "weekly" },
-              ])}
+          {SYNC_FIELDS.map(({ key, label }) => (
+            <s-checkbox
+              key={key}
+              label={label}
+              {...(toggles[key] ? { checked: true } : {})}
+              onChange={() => toggle(key)}
             />
+          ))}
 
-            <s-button submit {...(isLoading ? { loading: true } : {})}>
-              Save Settings
-            </s-button>
-          </s-stack>
-        </fetcher.Form>
+          <s-paragraph>
+            <s-text>Automatic Sync:</s-text>
+          </s-paragraph>
+          <s-checkbox
+            label="Enable automatic sync via webhooks (real-time on product change)"
+            {...(toggles.autoSync ? { checked: true } : {})}
+            onChange={() => toggle("autoSync")}
+          />
+
+          <s-select
+            label="Scheduled sync interval"
+            value={schedule}
+            options={JSON.stringify([
+              { label: "Disabled", value: "" },
+              { label: "Real-time (webhook only)", value: "realtime" },
+              { label: "Hourly", value: "hourly" },
+              { label: "Daily", value: "daily" },
+              { label: "Weekly", value: "weekly" },
+            ])}
+            onChange={(e) => setSchedule(e.target?.value ?? e.detail?.value ?? "")}
+          />
+
+          <s-button
+            onClick={saveSettings}
+            {...(isLoading ? { loading: true } : {})}
+          >
+            Save Sync Settings
+          </s-button>
+        </s-stack>
       </s-section>
 
       {/* Pricing rule */}
       <s-section heading="Pricing Adjustment">
         <s-paragraph>
-          Adjust the price when products are synced to this child store. Applies to all
-          products in this connection. Use negative values to decrease.
+          Adjust prices when products are synced to this child store. Applies
+          to <strong>all products</strong> in this connection. Use negative
+          values to decrease prices.
         </s-paragraph>
-        <fetcher.Form method="post">
-          <input type="hidden" name="intent" value="savePricing" />
-          <s-stack direction="block" gap="base">
-            <s-select
-              name="pricingType"
-              label="Adjustment type"
-              value={p?.type || "percentage"}
-              options={JSON.stringify([
-                { label: "Percentage (%)", value: "percentage" },
-                { label: "Fixed amount (currency)", value: "fixed" },
-              ])}
-            />
-            <s-text-field
-              name="adjustment"
-              label="Adjustment value (e.g. 15 for +15%, -10 for -10%, 5.00 for +$5)"
-              type="number"
-              value={String(p?.adjustment ?? 0)}
-            />
-            <s-button submit {...(isLoading ? { loading: true } : {})}>
-              Save Pricing Rule
-            </s-button>
-          </s-stack>
-        </fetcher.Form>
+        <s-stack direction="block" gap="base">
+          <s-select
+            label="Adjustment type"
+            value={pricingType}
+            options={JSON.stringify([
+              { label: "Percentage (%)", value: "percentage" },
+              { label: "Fixed amount (currency units)", value: "fixed" },
+            ])}
+            onChange={(e) =>
+              setPricingType(e.target?.value ?? e.detail?.value ?? "percentage")
+            }
+          />
+          <s-text-field
+            label={
+              pricingType === "percentage"
+                ? "Percentage adjustment (e.g. 15 = +15%, -10 = -10%)"
+                : "Fixed amount (e.g. 5.00 = +$5, -2.50 = -$2.50)"
+            }
+            type="number"
+            value={adjustment}
+            onChange={(e) =>
+              setAdjustment(e.target?.value ?? e.detail?.value ?? "0")
+            }
+          />
+          <s-button
+            onClick={savePricing}
+            {...(isLoading ? { loading: true } : {})}
+          >
+            Save Pricing Rule
+          </s-button>
+        </s-stack>
       </s-section>
     </s-page>
   );
