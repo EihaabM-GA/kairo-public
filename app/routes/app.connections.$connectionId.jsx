@@ -1,5 +1,7 @@
 import { redirect } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
+import { useState } from "react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { syncConnection } from "../sync.server";
@@ -13,6 +15,8 @@ export const loader = async ({ request, params }) => {
   if (!conn) return redirect("/app/connections");
   return { conn };
 };
+
+export const headers = (headersArgs) => boundary.headers(headersArgs);
 
 export const action = async ({ request, params }) => {
   await authenticate.admin(request);
@@ -70,7 +74,6 @@ export const action = async ({ request, params }) => {
   return null;
 };
 
-// ─── Toggle state managed in React (mirrors server values on load) ───────────
 const SYNC_FIELDS = [
   { key: "syncTitle", label: "Product Title" },
   { key: "syncDescription", label: "Description" },
@@ -81,8 +84,6 @@ const SYNC_FIELDS = [
   { key: "syncTags", label: "Tags" },
 ];
 
-import { useState } from "react";
-
 export default function ConnectionSettings() {
   const { conn } = useLoaderData();
   const fetcher = useFetcher();
@@ -91,7 +92,6 @@ export default function ConnectionSettings() {
   const s = conn.syncSettings;
   const p = conn.pricingRule;
 
-  // Local toggle state (initialised from server data)
   const [toggles, setToggles] = useState({
     syncTitle: s?.syncTitle ?? true,
     syncDescription: s?.syncDescription ?? true,
@@ -108,14 +108,11 @@ export default function ConnectionSettings() {
 
   const toggle = (key) => setToggles((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  // KEY FIX: read state from React, not from DOM s-* elements
   const saveSettings = () => {
     fetcher.submit(
       {
         intent: "saveSettings",
-        ...Object.fromEntries(
-          Object.entries(toggles).map(([k, v]) => [k, String(v)])
-        ),
+        ...Object.fromEntries(Object.entries(toggles).map(([k, v]) => [k, String(v)])),
         schedule,
       },
       { method: "post" }
@@ -123,10 +120,7 @@ export default function ConnectionSettings() {
   };
 
   const savePricing = () => {
-    fetcher.submit(
-      { intent: "savePricing", pricingType, adjustment },
-      { method: "post" }
-    );
+    fetcher.submit({ intent: "savePricing", pricingType, adjustment }, { method: "post" });
   };
 
   const syncNow = () => {
@@ -137,31 +131,21 @@ export default function ConnectionSettings() {
   const syncResult = fetcher.data?.syncResult;
 
   return (
-    <s-page
-      heading={`Connection: ${conn.parentShop} → ${conn.childShop}`}
-    >
-      <s-button
-        slot="primary-action"
-        href="/app/connections"
-        variant="tertiary"
-      >
+    <s-page heading={`Connection: ${conn.parentShop} → ${conn.childShop}`}>
+      <s-button slot="primary-action" href="/app/connections" variant="tertiary">
         ← Back
       </s-button>
 
-      {/* Save confirmation */}
       {saved && (
         <s-section heading="">
           <s-paragraph>
             <s-text tone="success">
-              ✅{" "}
-              {saved === "settings" ? "Sync settings" : "Pricing rule"} saved
-              successfully.
+              ✅ {saved === "settings" ? "Sync settings" : "Pricing rule"} saved successfully.
             </s-text>
           </s-paragraph>
         </s-section>
       )}
 
-      {/* Sync result */}
       {syncResult && (
         <s-section heading="Sync Result">
           <s-paragraph>
@@ -169,34 +153,24 @@ export default function ConnectionSettings() {
               <s-text tone="critical">❌ {syncResult.error}</s-text>
             ) : (
               <s-text tone="success">
-                ✅ {syncResult.synced} processed — {syncResult.created}{" "}
-                created, {syncResult.updated} updated, {syncResult.errors}{" "}
-                errors.
+                ✅ {syncResult.synced} processed — {syncResult.created} created,{" "}
+                {syncResult.updated} updated, {syncResult.errors} errors.
               </s-text>
             )}
           </s-paragraph>
         </s-section>
       )}
 
-      {/* Manual sync */}
       <s-section heading="Manual Sync">
-        <s-paragraph>
-          Push all parent products to this child store right now.
-        </s-paragraph>
-        <s-button
-          onClick={syncNow}
-          {...(isLoading ? { loading: true } : {})}
-        >
+        <s-paragraph>Push all parent products to this child store right now.</s-paragraph>
+        <s-button onClick={syncNow} {...(isLoading ? { loading: true } : {})}>
           Sync Now
         </s-button>
       </s-section>
 
-      {/* Sync settings */}
       <s-section heading="What to Sync">
         <s-stack direction="block" gap="base">
-          <s-paragraph>
-            <s-text>Toggle each field independently:</s-text>
-          </s-paragraph>
+          <s-paragraph><s-text>Toggle each field independently:</s-text></s-paragraph>
 
           {SYNC_FIELDS.map(({ key, label }) => (
             <s-checkbox
@@ -207,9 +181,7 @@ export default function ConnectionSettings() {
             />
           ))}
 
-          <s-paragraph>
-            <s-text>Automatic Sync:</s-text>
-          </s-paragraph>
+          <s-paragraph><s-text>Automatic Sync:</s-text></s-paragraph>
           <s-checkbox
             label="Enable automatic sync via webhooks (real-time on product change)"
             {...(toggles.autoSync ? { checked: true } : {})}
@@ -229,21 +201,16 @@ export default function ConnectionSettings() {
             onChange={(e) => setSchedule(e.target?.value ?? e.detail?.value ?? "")}
           />
 
-          <s-button
-            onClick={saveSettings}
-            {...(isLoading ? { loading: true } : {})}
-          >
+          <s-button onClick={saveSettings} {...(isLoading ? { loading: true } : {})}>
             Save Sync Settings
           </s-button>
         </s-stack>
       </s-section>
 
-      {/* Pricing rule */}
       <s-section heading="Pricing Adjustment">
         <s-paragraph>
-          Adjust prices when products are synced to this child store. Applies
-          to <strong>all products</strong> in this connection. Use negative
-          values to decrease prices.
+          Adjust prices when products are synced to this child store. Applies to{" "}
+          <strong>all products</strong> in this connection. Use negative values to decrease prices.
         </s-paragraph>
         <s-stack direction="block" gap="base">
           <s-select
@@ -253,9 +220,7 @@ export default function ConnectionSettings() {
               { label: "Percentage (%)", value: "percentage" },
               { label: "Fixed amount (currency units)", value: "fixed" },
             ])}
-            onChange={(e) =>
-              setPricingType(e.target?.value ?? e.detail?.value ?? "percentage")
-            }
+            onChange={(e) => setPricingType(e.target?.value ?? e.detail?.value ?? "percentage")}
           />
           <s-text-field
             label={
@@ -265,14 +230,9 @@ export default function ConnectionSettings() {
             }
             type="number"
             value={adjustment}
-            onChange={(e) =>
-              setAdjustment(e.target?.value ?? e.detail?.value ?? "0")
-            }
+            onChange={(e) => setAdjustment(e.target?.value ?? e.detail?.value ?? "0")}
           />
-          <s-button
-            onClick={savePricing}
-            {...(isLoading ? { loading: true } : {})}
-          >
+          <s-button onClick={savePricing} {...(isLoading ? { loading: true } : {})}>
             Save Pricing Rule
           </s-button>
         </s-stack>

@@ -1,12 +1,12 @@
 import { redirect } from "react-router";
 import { useLoaderData, useFetcher } from "react-router";
+import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
-
   const config = await prisma.storeConfig.findUnique({ where: { shop } });
   if (!config) return redirect("/app");
 
@@ -27,6 +27,8 @@ export const loader = async ({ request }) => {
   return { logs, connectionMap, shop };
 };
 
+export const headers = (headersArgs) => boundary.headers(headersArgs);
+
 export const action = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -46,11 +48,7 @@ export const action = async ({ request }) => {
   return null;
 };
 
-const STATUS_TONE = {
-  success: "success",
-  error: "critical",
-  running: "subdued",
-};
+const STATUS_TONE = { success: "success", error: "critical", running: "subdued" };
 
 export default function Logs() {
   const { logs, connectionMap, shop } = useLoaderData();
@@ -59,7 +57,7 @@ export default function Logs() {
   const cleared = fetcher.data?.cleared;
 
   const clearLogs = () => {
-    if (confirm("Clear all sync logs for this store? This cannot be undone.")) {
+    if (confirm("Clear all sync logs? This cannot be undone.")) {
       fetcher.submit({ intent: "clearLogs" }, { method: "post" });
     }
   };
@@ -72,32 +70,18 @@ export default function Logs() {
         ← Dashboard
       </s-button>
 
-      {/* Summary counts */}
       <s-section heading="Overview">
         <s-stack direction="inline" gap="base">
+          <s-paragraph><s-text>Total: {displayLogs.length}</s-text></s-paragraph>
           <s-paragraph>
-            <s-text>Total logs: {displayLogs.length}</s-text>
+            <s-text tone="success">✅ Success: {displayLogs.filter((l) => l.status === "success").length}</s-text>
           </s-paragraph>
           <s-paragraph>
-            <s-text tone="success">
-              ✅ Successful:{" "}
-              {displayLogs.filter((l) => l.status === "success").length}
-            </s-text>
-          </s-paragraph>
-          <s-paragraph>
-            <s-text tone="critical">
-              ❌ Errors:{" "}
-              {displayLogs.filter((l) => l.status === "error").length}
-            </s-text>
+            <s-text tone="critical">❌ Errors: {displayLogs.filter((l) => l.status === "error").length}</s-text>
           </s-paragraph>
         </s-stack>
         {displayLogs.length > 0 && (
-          <s-button
-            tone="critical"
-            variant="tertiary"
-            onClick={clearLogs}
-            {...(isLoading ? { loading: true } : {})}
-          >
+          <s-button tone="critical" variant="tertiary" onClick={clearLogs} {...(isLoading ? { loading: true } : {})}>
             Clear All Logs
           </s-button>
         )}
@@ -105,9 +89,7 @@ export default function Logs() {
 
       {displayLogs.length === 0 ? (
         <s-section heading="No logs yet">
-          <s-paragraph>
-            Sync logs will appear here after your first sync operation.
-          </s-paragraph>
+          <s-paragraph>Sync logs will appear here after your first sync.</s-paragraph>
         </s-section>
       ) : (
         displayLogs.map((log) => {
@@ -115,59 +97,35 @@ export default function Logs() {
           if (!conn) return null;
           const isParent = conn.parentShop === shop;
           const other = isParent ? conn.childShop : conn.parentShop;
-          const direction = isParent ? `→ ${other}` : `← ${other}`;
-
-          let details = null;
-          if (log.details) {
-            try {
-              details = JSON.parse(log.details);
-            } catch {
-              details = null;
-            }
-          }
-
-          const errorItems = details?.filter((d) => d.action === "error") ?? [];
+          let errorItems = [];
+          try { errorItems = JSON.parse(log.details || "[]").filter((d) => d.action === "error"); } catch {}
 
           return (
             <s-section
               key={log.id}
-              heading={`${direction} — ${new Date(log.createdAt).toLocaleString()}`}
+              heading={`${isParent ? "→" : "←"} ${other} — ${new Date(log.createdAt).toLocaleString()}`}
             >
               <s-stack direction="block" gap="tight">
                 <s-paragraph>
-                  <s-text
-                    tone={STATUS_TONE[log.status] ?? "subdued"}
-                  >
+                  <s-text tone={STATUS_TONE[log.status] ?? "subdued"}>
                     Status: {log.status.toUpperCase()}
                   </s-text>
                 </s-paragraph>
-
                 <s-paragraph>
                   <s-text>
-                    {log.synced} processed — {log.created} created,{" "}
-                    {log.updated} updated, {log.errors} errors
+                    {log.synced} processed — {log.created} created, {log.updated} updated, {log.errors} errors
                   </s-text>
                 </s-paragraph>
-
                 {errorItems.length > 0 && (
                   <s-paragraph>
                     <s-text tone="critical">
-                      Failed product IDs:{" "}
-                      {errorItems
-                        .slice(0, 5)
-                        .map((e) => e.productId?.split("/").pop())
-                        .join(", ")}
-                      {errorItems.length > 5
-                        ? ` +${errorItems.length - 5} more`
-                        : ""}
+                      Failed IDs: {errorItems.slice(0, 5).map((e) => e.productId?.split("/").pop()).join(", ")}
+                      {errorItems.length > 5 ? ` +${errorItems.length - 5} more` : ""}
                     </s-text>
                   </s-paragraph>
                 )}
-
                 <s-paragraph>
-                  <s-link href={`/app/connections/${log.connectionId}`}>
-                    View connection settings
-                  </s-link>
+                  <s-link href={`/app/connections/${log.connectionId}`}>View connection settings</s-link>
                 </s-paragraph>
               </s-stack>
             </s-section>

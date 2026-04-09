@@ -1,4 +1,16 @@
-import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
+import { 
+  Links, 
+  Meta, 
+  Outlet, 
+  Scripts, 
+  ScrollRestoration,
+  useRouteError // <-- 1. Import useRouteError
+} from "react-router";
+
+// 2. Import Shopify's boundary utility. 
+// (Note: If you are using the older Remix package, this import will 
+// be "@shopify/shopify-app-remix/server" instead)
+import { boundary } from "@shopify/shopify-app-react-router/server";
 
 export default function App() {
   return (
@@ -22,3 +34,17 @@ export default function App() {
     </html>
   );
 }
+
+// 3. Add Shopify's ErrorBoundary. 
+// When your loader throws an auth redirect, this catches it and transforms it 
+// so App Bridge knows how to handle the top-level navigation.
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return boundary.error(error);
+}
+
+// 4. Add the headers export.
+// This physically injects the required X-Shopify App Bridge headers into the response.
+export const headers = (headersArgs) => {
+  return boundary.headers(headersArgs);
+};

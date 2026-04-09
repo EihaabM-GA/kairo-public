@@ -4,6 +4,12 @@ import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }) => {
+  // authenticate.admin() does two things when called here:
+  // 1. If the session is valid → returns normally, app renders
+  // 2. If the session is missing/expired → throws a redirect response
+  //    that AppBridge intercepts to break out of the iframe and
+  //    do OAuth at the top-level frame. This is the correct fix for
+  //    "accounts.shopify.com refused to connect".
   await authenticate.admin(request);
 
   // eslint-disable-next-line no-undef
@@ -14,6 +20,9 @@ export default function App() {
   const { apiKey } = useLoaderData();
 
   return (
+    // `embedded` tells AppProvider to initialise Shopify AppBridge.
+    // AppBridge is what intercepts auth redirects so they break out of
+    // the iframe instead of trying to load OAuth inside it.
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
         <s-link href="/app">Home</s-link>
@@ -25,7 +34,9 @@ export default function App() {
   );
 }
 
-// Shopify needs React Router to catch some thrown responses, so that their headers are included in the response.
+// boundary.error() catches Shopify's thrown redirect responses (e.g. auth
+// redirects) and ensures their headers (including the AppBridge redirect
+// header) are included in the response sent to the browser.
 export function ErrorBoundary() {
   return boundary.error(useRouteError());
 }

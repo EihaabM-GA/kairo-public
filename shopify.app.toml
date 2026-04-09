@@ -28,7 +28,7 @@ api_version = "2026-01"
   uri = "/webhooks/products/update"
 
 [access_scopes]
-scopes = "write_products"
+scopes = "read_products,write_products,read_inventory,write_inventory,read_locations"
 optional_scopes = []
 use_legacy_install_flow = false
 

@@ -1,5 +1,6 @@
 import { redirect } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
+import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
@@ -12,21 +13,21 @@ export const loader = async ({ request }) => {
   return { shop: session.shop };
 };
 
+// Every route calling authenticate.admin() needs this — see app.jsx comment.
+export const headers = (headersArgs) => boundary.headers(headersArgs);
+
 export const action = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const formData = await request.formData();
   const role = formData.get("role");
-
   if (!["parent", "child", "both"].includes(role)) {
     return { error: "Invalid role selected." };
   }
-
   await prisma.storeConfig.upsert({
     where: { shop: session.shop },
     update: { role },
     create: { shop: session.shop, role },
   });
-
   return redirect("/app/dashboard");
 };
 
@@ -34,12 +35,7 @@ export default function Onboarding() {
   const { shop } = useLoaderData();
   const fetcher = useFetcher();
   const isLoading = fetcher.state !== "idle";
-
-  // KEY FIX: call fetcher.submit() directly — s-button's `submit` attr
-  // doesn't reliably fire fetcher.Form's submit in the embedded iframe.
-  const selectRole = (role) => {
-    fetcher.submit({ role }, { method: "post" });
-  };
+  const selectRole = (role) => fetcher.submit({ role }, { method: "post" });
 
   return (
     <s-page heading="Welcome to Kairo Sync">
@@ -60,7 +56,6 @@ export default function Onboarding() {
 
       <s-section heading="What role does this store play?">
         <s-stack direction="block" gap="base">
-          {/* Parent */}
           <s-box padding="base" borderWidth="base" borderRadius="base">
             <s-stack direction="block" gap="tight">
               <s-heading>🏪 Parent Store</s-heading>
@@ -68,16 +63,12 @@ export default function Onboarding() {
                 This store owns the products. Changes here will push to
                 connected child stores automatically or on demand.
               </s-paragraph>
-              <s-button
-                onClick={() => selectRole("parent")}
-                {...(isLoading ? { loading: true } : {})}
-              >
+              <s-button onClick={() => selectRole("parent")} {...(isLoading ? { loading: true } : {})}>
                 Set as Parent
               </s-button>
             </s-stack>
           </s-box>
 
-          {/* Child */}
           <s-box padding="base" borderWidth="base" borderRadius="base">
             <s-stack direction="block" gap="tight">
               <s-heading>🏬 Child Store</s-heading>
@@ -85,17 +76,12 @@ export default function Onboarding() {
                 This store receives products from a parent. Inventory and
                 product data will be synced in from another store.
               </s-paragraph>
-              <s-button
-                variant="secondary"
-                onClick={() => selectRole("child")}
-                {...(isLoading ? { loading: true } : {})}
-              >
+              <s-button variant="secondary" onClick={() => selectRole("child")} {...(isLoading ? { loading: true } : {})}>
                 Set as Child
               </s-button>
             </s-stack>
           </s-box>
 
-          {/* Both */}
           <s-box padding="base" borderWidth="base" borderRadius="base">
             <s-stack direction="block" gap="tight">
               <s-heading>🔄 Both</s-heading>
@@ -103,11 +89,7 @@ export default function Onboarding() {
                 This store can act as both a parent and a child — syncing to
                 some stores while receiving from others.
               </s-paragraph>
-              <s-button
-                variant="tertiary"
-                onClick={() => selectRole("both")}
-                {...(isLoading ? { loading: true } : {})}
-              >
+              <s-button variant="tertiary" onClick={() => selectRole("both")} {...(isLoading ? { loading: true } : {})}>
                 Set as Both
               </s-button>
             </s-stack>

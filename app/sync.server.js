@@ -1,16 +1,45 @@
 import shopify from "./shopify.server";
 import prisma from "./db.server";
 
-async function getSession(shop) {
-  const id = shopify.api.session.getOfflineId(shop);
-  return shopify.sessionStorage.loadSession(id);
+// ─────────────────────────────────────────────────────────────────────────────
+// ROOT FIX: shopify.api is undefined in @shopify/shopify-app-react-router.
+//
+// The correct pattern for server-side / background GraphQL calls (sync jobs,
+// webhooks, scheduled tasks) is:
+//
+//   const { admin } = await shopify.unauthenticated.admin(shopDomain);
+//   const res = await admin.graphql(QUERY, { variables });
+//   const json = await res.json();
+//
+// unauthenticated.admin() looks up the offline session from storage itself.
+// You never need shopify.api.clients or raw session objects.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function gql(shop, query, variables = {}) {
+  let admin;
+  try {
+    ({ admin } = await shopify.unauthenticated.admin(shop));
+  } catch (err) {
+    throw new Error(
+      `No OAuth session found for ${shop}. ` +
+        `Make sure the app is installed on that store and it has re-authenticated ` +
+        `after the latest deployment. (${err.message})`
+    );
+  }
+
+  const response = await admin.graphql(query, { variables });
+  const json = await response.json();
+
+  if (json.errors?.length) {
+    throw new Error(
+      `GraphQL error for ${shop}: ${json.errors.map((e) => e.message).join(", ")}`
+    );
+  }
+
+  return json.data;
 }
 
-async function gql(session, query, variables = {}) {
-  const client = new shopify.api.clients.Graphql({ session });
-  const res = await client.request(query, { variables });
-  return res.data;
-}
+// ─── GraphQL documents ───────────────────────────────────────────────────────
 
 const PRODUCTS_QUERY = `#graphql
   query Products($cursor: String) {
@@ -46,7 +75,9 @@ const FIND_BY_SKU = `#graphql
     products(first: 5, query: $q) {
       nodes {
         id
-        variants(first: 10) { nodes { id sku inventoryQuantity inventoryItem { id } } }
+        variants(first: 10) {
+          nodes { id sku inventoryQuantity inventoryItem { id } }
+        }
       }
     }
   }
@@ -55,7 +86,9 @@ const FIND_BY_SKU = `#graphql
 const PRODUCT_VARIANTS = `#graphql
   query ProductVariants($id: ID!) {
     product(id: $id) {
-      variants(first: 10) { nodes { id sku inventoryQuantity inventoryItem { id } } }
+      variants(first: 10) {
+        nodes { id sku inventoryQuantity inventoryItem { id } }
+      }
     }
   }
 `;
@@ -65,13 +98,22 @@ const LOCATIONS = `#graphql
 `;
 
 const CREATE_PRODUCT = `#graphql
-  mutation CreateProduct($product: ProductCreateInput!) {
-    productCreate(product: $product) {
+  mutation CreateProductForSync($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
+    productCreate(product: $product, media: $media) {
       product {
         id
-        variants(first: 10) { nodes { id inventoryItem { id } } }
+        variants(first: 10) {
+          nodes {
+            id
+            price
+            inventoryItem { id }
+          }
+        }
       }
-      userErrors { field message }
+      userErrors {
+        field
+        message
+      }
     }
   }
 `;
@@ -103,6 +145,8 @@ const ADJUST_INVENTORY = `#graphql
   }
 `;
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function applyPricing(price, rule) {
   if (!rule || rule.adjustment === 0) return String(price);
   const p = parseFloat(price);
@@ -111,12 +155,12 @@ function applyPricing(price, rule) {
     : (p + rule.adjustment).toFixed(2);
 }
 
-async function fetchAllProducts(session) {
+async function fetchAllProducts(parentShop) {
   const all = [];
   let cursor = null;
   let hasMore = true;
   while (hasMore) {
-    const data = await gql(session, PRODUCTS_QUERY, { cursor });
+    const data = await gql(parentShop, PRODUCTS_QUERY, { cursor });
     all.push(...data.products.nodes);
     hasMore = data.products.pageInfo.hasNextPage;
     cursor = data.products.pageInfo.endCursor;
@@ -124,11 +168,12 @@ async function fetchAllProducts(session) {
   return all;
 }
 
-async function syncOneProduct(parentProduct, childSession, connection, pricingRule) {
+// ─── Per-product sync ────────────────────────────────────────────────────────
+
+async function syncOneProduct(parentProduct, parentShop, childShop, connection, pricingRule) {
   const settings = connection.syncSettings;
   const sku = parentProduct.variants.nodes[0]?.sku;
 
-  // Look for existing mapping
   let map = await prisma.productMap.findUnique({
     where: {
       connectionId_parentProductId: {
@@ -140,15 +185,15 @@ async function syncOneProduct(parentProduct, childSession, connection, pricingRu
 
   let childProductId = map?.childProductId;
 
-  // Try to find in child store by SKU if no map
+  // No mapping — try to find by SKU in the child store
   if (!childProductId && sku) {
-    const found = await gql(childSession, FIND_BY_SKU, { q: `sku:${sku}` });
+    const found = await gql(childShop, FIND_BY_SKU, { q: `sku:${sku}` });
     const match = found.products.nodes.find((p) =>
       p.variants.nodes.some((v) => v.sku === sku)
     );
     if (match) {
       childProductId = match.id;
-      map = await prisma.productMap.upsert({
+      await prisma.productMap.upsert({
         where: {
           connectionId_parentProductId: {
             connectionId: connection.id,
@@ -167,25 +212,29 @@ async function syncOneProduct(parentProduct, childSession, connection, pricingRu
     }
   }
 
-  // — EXISTING PRODUCT: update inventory + toggled fields —
+  // ── EXISTING PRODUCT — update toggled fields ──────────────────────────────
   if (childProductId) {
-    const childData = await gql(childSession, PRODUCT_VARIANTS, { id: childProductId });
+    const childData = await gql(childShop, PRODUCT_VARIANTS, { id: childProductId });
     const childVariants = childData.product?.variants.nodes || [];
 
     if (settings?.syncInventory) {
-      const locData = await gql(childSession, LOCATIONS);
+      const locData = await gql(childShop, LOCATIONS);
       const locationId = locData.locations.nodes[0]?.id;
       if (locationId) {
         const changes = [];
         for (const pv of parentProduct.variants.nodes) {
-          const cv = childVariants.find((v) => v.sku === pv.sku || (!pv.sku && !v.sku));
+          const cv = childVariants.find(
+            (v) => v.sku === pv.sku || (!pv.sku && !v.sku)
+          );
           if (cv && pv.inventoryQuantity != null) {
             const delta = pv.inventoryQuantity - (cv.inventoryQuantity || 0);
-            if (delta !== 0) changes.push({ inventoryItemId: cv.inventoryItem.id, locationId, delta });
+            if (delta !== 0) {
+              changes.push({ inventoryItemId: cv.inventoryItem.id, locationId, delta });
+            }
           }
         }
         if (changes.length > 0) {
-          await gql(childSession, ADJUST_INVENTORY, {
+          await gql(childShop, ADJUST_INVENTORY, {
             input: { reason: "correction", name: "available", changes },
           });
         }
@@ -198,17 +247,21 @@ async function syncOneProduct(parentProduct, childSession, connection, pricingRu
     if (settings?.syncDescription) { updateInput.descriptionHtml = parentProduct.descriptionHtml; hasUpdate = true; }
     if (settings?.syncTags)        { updateInput.tags = parentProduct.tags; hasUpdate = true; }
     if (settings?.syncVendor)      { updateInput.vendor = parentProduct.vendor; hasUpdate = true; }
-    if (hasUpdate) await gql(childSession, UPDATE_PRODUCT, { product: updateInput });
+    if (hasUpdate) {
+      await gql(childShop, UPDATE_PRODUCT, { product: updateInput });
+    }
 
     if (settings?.syncPrice) {
       const variantUpdates = parentProduct.variants.nodes
         .map((pv) => {
-          const cv = childVariants.find((v) => v.sku === pv.sku || (!pv.sku && !v.sku));
+          const cv = childVariants.find(
+            (v) => v.sku === pv.sku || (!pv.sku && !v.sku)
+          );
           return cv ? { id: cv.id, price: applyPricing(pv.price, pricingRule) } : null;
         })
         .filter(Boolean);
       if (variantUpdates.length > 0) {
-        await gql(childSession, UPDATE_VARIANTS, {
+        await gql(childShop, UPDATE_VARIANTS, {
           productId: childProductId,
           variants: variantUpdates,
         });
@@ -218,39 +271,42 @@ async function syncOneProduct(parentProduct, childSession, connection, pricingRu
     return { action: "updated", productId: parentProduct.id };
   }
 
-  // — NEW PRODUCT: create in child —
-  const productInput = {
-    status: "ACTIVE",
-    title: parentProduct.title,
-  };
-  if (settings?.syncDescription) productInput.descriptionHtml = parentProduct.descriptionHtml;
-  if (settings?.syncVendor)      productInput.vendor = parentProduct.vendor;
-  if (settings?.syncTags)        productInput.tags = parentProduct.tags;
-  if (settings?.syncImages && parentProduct.images.nodes.length > 0) {
-    productInput.images = parentProduct.images.nodes.map((img) => ({
-      src: img.src,
-      altText: img.altText || "",
-    }));
-  }
-  productInput.variants = parentProduct.variants.nodes.map((v) => ({
-    ...(v.sku ? { sku: v.sku } : {}),
-    price: settings?.syncPrice ? applyPricing(v.price, pricingRule) : v.price,
+  // ── NEW PRODUCT — create in child store ───────────────────────────────────
+// ── NEW PRODUCT — create in child store ───────────────────────────────────
+const productInput = { status: "ACTIVE", title: parentProduct.title };
+
+if (settings?.syncDescription) productInput.descriptionHtml = parentProduct.descriptionHtml;
+if (settings?.syncVendor)      productInput.vendor = parentProduct.vendor;
+if (settings?.syncTags)        productInput.tags = parentProduct.tags;
+
+// Build media array from parent images (if enabled)
+let mediaInput;
+if (settings?.syncImages && parentProduct.images.nodes.length > 0) {
+  mediaInput = parentProduct.images.nodes.map((img) => ({
+    originalSource: img.src,
+    alt: img.altText || "",
+    mediaContentType: "IMAGE",
   }));
+}
 
-  const created = await gql(childSession, CREATE_PRODUCT, { product: productInput });
+// Call productCreate with product + media
+const created = await gql(childShop, CREATE_PRODUCT, {
+  product: productInput,
+  media: mediaInput,
+});
 
-  if (created.productCreate.userErrors?.length > 0) {
-    return {
-      action: "error",
-      productId: parentProduct.id,
-      errors: created.productCreate.userErrors.map((e) => e.message),
-    };
-  }
+if (created.productCreate.userErrors?.length > 0) {
+  return {
+    action: "error",
+    productId: parentProduct.id,
+    errors: created.productCreate.userErrors.map((e) => e.message),
+  };
+}
 
-  const newId = created.productCreate.product.id;
-  const newVariants = created.productCreate.product.variants.nodes;
+const newId = created.productCreate.product.id;
+const newVariants = created.productCreate.product.variants.nodes;
 
-  await prisma.productMap.upsert({
+await prisma.productMap.upsert({
     where: {
       connectionId_parentProductId: {
         connectionId: connection.id,
@@ -268,7 +324,7 @@ async function syncOneProduct(parentProduct, childSession, connection, pricingRu
   });
 
   if (settings?.syncInventory && newVariants.length > 0) {
-    const locData = await gql(childSession, LOCATIONS);
+    const locData = await gql(childShop, LOCATIONS);
     const locationId = locData.locations.nodes[0]?.id;
     if (locationId) {
       const changes = newVariants
@@ -280,15 +336,19 @@ async function syncOneProduct(parentProduct, childSession, connection, pricingRu
         })
         .filter(Boolean);
       if (changes.length > 0) {
-        await gql(childSession, ADJUST_INVENTORY, {
+        await gql(childShop, ADJUST_INVENTORY, {
           input: { reason: "correction", name: "available", changes },
-        }).catch(() => {});
+        }).catch((err) =>
+          console.warn(`[sync] inventory set failed for new product ${newId}:`, err.message)
+        );
       }
     }
   }
 
   return { action: "created", productId: parentProduct.id };
 }
+
+// ─── Public API ──────────────────────────────────────────────────────────────
 
 export async function syncConnection(connectionId, productIds = null) {
   const connection = await prisma.storeConnection.findUnique({
@@ -300,36 +360,57 @@ export async function syncConnection(connectionId, productIds = null) {
     return { error: "Connection not found or paused" };
   }
 
-  const log = await prisma.syncLog.create({ data: { connectionId, status: "running" } });
+  const { parentShop, childShop } = connection;
+
+  const log = await prisma.syncLog.create({
+    data: { connectionId, status: "running" },
+  });
 
   try {
-    const parentSession = await getSession(connection.parentShop);
-    const childSession  = await getSession(connection.childShop);
-
-    if (!parentSession || !childSession) {
-      await prisma.syncLog.update({
-        where: { id: log.id },
-        data: { status: "error", details: JSON.stringify(["Missing OAuth session for a store"]) },
-      });
-      return { error: "Missing sessions — both stores must have the app installed" };
+    // Verify sessions exist up-front — gives a clear error instead of a
+    // cryptic crash mid-sync if a store hasn't re-authenticated.
+    try {
+      await shopify.unauthenticated.admin(parentShop);
+    } catch {
+      throw new Error(
+        `No OAuth session for parent store "${parentShop}". ` +
+          `Open that store in the Shopify admin and re-open the app to re-authenticate.`
+      );
+    }
+    try {
+      await shopify.unauthenticated.admin(childShop);
+    } catch {
+      throw new Error(
+        `No OAuth session for child store "${childShop}". ` +
+          `Open that store in the Shopify admin and re-open the app to re-authenticate.`
+      );
     }
 
     let products;
     if (productIds?.length) {
-      const data = await gql(parentSession, PRODUCTS_BY_IDS, { ids: productIds });
+      const data = await gql(parentShop, PRODUCTS_BY_IDS, { ids: productIds });
       products = data.nodes.filter(Boolean);
     } else {
-      products = await fetchAllProducts(parentSession);
+      products = await fetchAllProducts(parentShop);
     }
 
     let created = 0, updated = 0, errors = 0;
     const details = [];
 
     for (const product of products) {
-      const result = await syncOneProduct(product, childSession, connection, connection.pricingRule);
+      const result = await syncOneProduct(
+        product,
+        parentShop,
+        childShop,
+        connection,
+        connection.pricingRule
+      );
       if (result.action === "created") created++;
       else if (result.action === "updated") updated++;
-      else if (result.action === "error") errors++;
+      else if (result.action === "error") {
+        errors++;
+        console.error(`[sync] product error ${result.productId}:`, result.errors);
+      }
       details.push(result);
     }
 
@@ -337,7 +418,7 @@ export async function syncConnection(connectionId, productIds = null) {
     await prisma.syncLog.update({
       where: { id: log.id },
       data: {
-        status: errors === synced && synced > 0 ? "error" : "success",
+        status: errors > 0 && errors === synced ? "error" : "success",
         synced,
         created,
         updated,
@@ -355,6 +436,7 @@ export async function syncConnection(connectionId, productIds = null) {
 
     return { synced, created, updated, errors };
   } catch (err) {
+    console.error(`[sync] syncConnection error for ${connectionId}:`, err);
     await prisma.syncLog.update({
       where: { id: log.id },
       data: { status: "error", details: JSON.stringify([err.message]) },
